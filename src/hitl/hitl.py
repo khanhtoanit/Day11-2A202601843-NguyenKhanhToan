@@ -65,32 +65,40 @@ class ConfidenceRouter:
         Returns:
             RoutingDecision with routing action and metadata
         """
-        # TODO 11: Implement routing logic
-        #
-        # 1. Check if action_type is in HIGH_RISK_ACTIONS
-        #    -> If yes: always escalate (action="escalate", priority="high",
-        #       requires_human=True, reason="High-risk action: {action_type}")
-        #
-        # 2. Check confidence thresholds:
-        #    - confidence >= 0.9:
-        #      action="auto_send", priority="low",
-        #      requires_human=False, reason="High confidence"
-        #
-        #    - 0.7 <= confidence < 0.9:
-        #      action="queue_review", priority="normal",
-        #      requires_human=True, reason="Medium confidence — needs review"
-        #
-        #    - confidence < 0.7:
-        #      action="escalate", priority="high",
-        #      requires_human=True, reason="Low confidence — escalating"
+        if action_type in HIGH_RISK_ACTIONS:
+            return RoutingDecision(
+                action="escalate",
+                confidence=confidence,
+                reason=f"High-risk action: {action_type}",
+                priority="high",
+                requires_human=True,
+            )
+
+        if confidence >= self.HIGH_THRESHOLD:
+            return RoutingDecision(
+                action="auto_send",
+                confidence=confidence,
+                reason="High confidence",
+                priority="low",
+                requires_human=False,
+            )
+
+        if confidence >= self.MEDIUM_THRESHOLD:
+            return RoutingDecision(
+                action="queue_review",
+                confidence=confidence,
+                reason="Medium confidence — needs review",
+                priority="normal",
+                requires_human=True,
+            )
 
         return RoutingDecision(
-            action="auto_send",
+            action="escalate",
             confidence=confidence,
-            reason="TODO: implement routing logic",
-            priority="low",
-            requires_human=False,
-        )  # TODO: Replace with implementation
+            reason="Low confidence — escalating",
+            priority="high",
+            requires_human=True,
+        )
 
 
 # ============================================================
@@ -111,33 +119,101 @@ class ConfidenceRouter:
 hitl_decision_points = [
     {
         "id": 1,
-        "name": "TODO: Name this decision point",
-        "trigger": "TODO: When does this trigger?",
-        "hitl_model": "TODO: human-in-the-loop / human-on-the-loop / human-as-tiebreaker",
-        "context_needed": "TODO: What does the reviewer need to see?",
-        "example": "TODO: Give a concrete example scenario",
-        "approval_path": "TODO: Explain approve, reject and timeout behavior",
-        "audit_fields": "TODO: List correlation ID, intent, diff and reviewer decision",
+        "name": "High-risk action approval (transfer / close account / change password)",
+        "trigger": (
+            "ConfidenceRouter classifies action_type as one of HIGH_RISK_ACTIONS "
+            "(transfer_money, close_account, change_password, delete_data, "
+            "update_personal_info) — always escalates regardless of confidence."
+        ),
+        "hitl_model": "human-in-the-loop",
+        "context_needed": (
+            "Customer/account ID, requested action, amount and destination, the "
+            "agent's proposed ActionRequest payload, and why authorize_action() "
+            "flagged it (e.g. destination not allowlisted, needs approval)."
+        ),
+        "example": (
+            "Agent drafts a 50,000,000 VND transfer to a new payee from a chat "
+            "request. The action is queued; a bank ops reviewer sees the customer "
+            "message, the proposed transfer diff (amount, destination account), and "
+            "recent account activity before deciding."
+        ),
+        "approval_path": (
+            "Approve: reviewer issues an approval_id (format HITL-XXXXXXXX) that "
+            "authorize_action() requires before the transfer executes. Reject: the "
+            "action is discarded and the customer is told it needs manual "
+            "processing. Timeout (no reviewer response within SLA, e.g. 15 min): "
+            "auto-reject (fail-closed) and escalate to a supervisor queue."
+        ),
+        "audit_fields": (
+            "correlation/request_id, customer intent (raw text), proposed action + "
+            "diff (action, destination, payload), reviewer_id, approval_id, "
+            "decision (approve/reject/timeout), decision timestamp."
+        ),
     },
     {
         "id": 2,
-        "name": "TODO: Name this decision point",
-        "trigger": "TODO: When does this trigger?",
-        "hitl_model": "TODO: human-in-the-loop / human-on-the-loop / human-as-tiebreaker",
-        "context_needed": "TODO: What does the reviewer need to see?",
-        "example": "TODO: Give a concrete example scenario",
-        "approval_path": "TODO: Explain approve, reject and timeout behavior",
-        "audit_fields": "TODO: List correlation ID, intent, diff and reviewer decision",
+        "name": "Low/medium confidence response review",
+        "trigger": (
+            "ConfidenceRouter scores the drafted response below HIGH_THRESHOLD "
+            "(0.9) for a non-high-risk action: 0.7-0.9 queues for review, below "
+            "0.7 escalates immediately."
+        ),
+        "hitl_model": "human-in-the-loop",
+        "context_needed": (
+            "The customer's original question, the agent's drafted response, the "
+            "confidence score and why it's low (e.g. ambiguous request, off-script "
+            "topic), and any output_guardrail/content_filter flags on the draft."
+        ),
+        "example": (
+            "Customer asks a compound question mixing loan eligibility and a "
+            "complaint. The agent's draft response has confidence 0.78 — it's "
+            "queued; a support agent edits or approves it before it reaches the "
+            "customer."
+        ),
+        "approval_path": (
+            "Approve: response is sent as-is. Reject/edit: reviewer rewrites the "
+            "response before sending. Timeout (e.g. 5 min unattended in the review "
+            "queue): fall back to a safe canned reply ('a specialist will follow "
+            "up') instead of auto-sending the low-confidence draft."
+        ),
+        "audit_fields": (
+            "correlation/request_id, original question, draft response, "
+            "confidence score, reviewer_id, final response sent, decision "
+            "(approve/edit/timeout), decision timestamp."
+        ),
     },
     {
         "id": 3,
-        "name": "TODO: Name this decision point",
-        "trigger": "TODO: When does this trigger?",
-        "hitl_model": "TODO: human-in-the-loop / human-on-the-loop / human-as-tiebreaker",
-        "context_needed": "TODO: What does the reviewer need to see?",
-        "example": "TODO: Give a concrete example scenario",
-        "approval_path": "TODO: Explain approve, reject and timeout behavior",
-        "audit_fields": "TODO: List correlation ID, intent, diff and reviewer decision",
+        "name": "Borderline output-guardrail / judge flag (human-as-tiebreaker)",
+        "trigger": (
+            "content_filter() and the LLM safety judge disagree or give a weak "
+            "signal — e.g. the judge says UNSAFE but content_filter finds no PII/"
+            "secret pattern, or vice versa."
+        ),
+        "hitl_model": "human-as-tiebreaker",
+        "context_needed": (
+            "The full response text, which layer flagged it and why (judge "
+            "verdict + reason, or content_filter issues list), the redacted "
+            "fallback that would be sent if auto-blocked, and the original "
+            "customer question."
+        ),
+        "example": (
+            "The judge marks a response UNSAFE for a 'possibly hallucinated "
+            "interest rate' but content_filter finds no PII/secret. Instead of "
+            "silently auto-sending or auto-blocking, a reviewer breaks the tie by "
+            "checking the real rate."
+        ),
+        "approval_path": (
+            "Approve (send original): tie broken in favor of the draft. Reject "
+            "(send the safe fallback message): tie broken against it. Timeout (no "
+            "reviewer within SLA): fail closed — send the safe fallback message, "
+            "never the unresolved draft."
+        ),
+        "audit_fields": (
+            "correlation/request_id, response text, judge verdict + reason, "
+            "content_filter issues, reviewer_id, tie-break decision, decision "
+            "timestamp."
+        ),
     },
 ]
 
